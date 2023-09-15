@@ -1,0 +1,164 @@
+CREATE OR REPLACE FUNCTION public.fn_registro_apertura(pidlogin integer, pidtipo integer, pidcaja integer, psaldoactual numeric, pfecha text, pencargado integer, OUT omensaje character varying, OUT oboolean boolean, OUT omonto numeric, OUT oturno integer)
+ RETURNS record
+ LANGUAGE plpgsql
+AS $function$
+DECLARE 
+    vid_ubicacion integer;
+    vfecha_ant text;
+    vid_caja integer;
+    vid_tipo integer;
+    vmonto_saldo numeric;
+BEGIN
+    RAISE NOTICE '------------------- INICIO ---------------------';
+    omensaje := '';
+    oboolean := TRUE;
+    omonto := 0;
+    oturno := 0;
+
+    -- Se agrega la ubicación
+    vid_ubicacion := (SELECT id_proyecto FROM seg_usuario su WHERE id_usuario = pidlogin);
+
+    vfecha_ant := (SELECT fecha FROM ope_caja
+                   WHERE fecha < pfecha::date
+                   AND apiestado <> 'ANULADO'
+                   AND id_ubicacion = vid_ubicacion
+                   GROUP BY id_tipo, fecha
+                   ORDER BY fecha DESC LIMIT 1);
+    RAISE NOTICE 'Fecha ant: %', vfecha_ant;
+
+    vid_tipo := (SELECT id_tipo FROM ope_caja
+                 WHERE fecha = vfecha_ant::date
+                 AND apiestado <> 'ANULADO'
+                 AND id_ubicacion = vid_ubicacion
+                 ORDER BY feccre DESC LIMIT 1);
+    RAISE NOTICE 'vid_tipo: %', vid_tipo;
+
+    vid_caja := (SELECT id_caja FROM ope_caja
+                 WHERE fecha = vfecha_ant::date
+                 AND apiestado <> 'ANULADO'
+                 AND id_ubicacion = vid_ubicacion
+                 AND id_tipo = vid_tipo LIMIT 1);
+    RAISE NOTICE 'vid_caja: %', vid_caja;
+
+    vmonto_saldo := (SELECT monto_saldo FROM ope_caja
+                     WHERE fecha = vfecha_ant::date
+                     AND apiestado <> 'ANULADO'
+                     AND id_ubicacion = vid_ubicacion
+                     AND id_tipo = vid_tipo LIMIT 1);
+    RAISE NOTICE 'vmonto_saldo: %', vmonto_saldo;
+
+    vmonto_saldo := (SELECT CASE WHEN vmonto_saldo IS NULL THEN 0 ELSE vmonto_saldo END);
+    oturno := (
+    SELECT CASE 
+    WHEN EXISTS (
+      SELECT 1 FROM ope_caja 
+      WHERE fecha = pfecha::date
+      AND turno = 1  
+      AND apiestado = 'ANULADO'
+    ) THEN 1
+    ELSE COALESCE(MAX(turno), 0) + 1
+   END
+   FROM ope_caja WHERE fecha = pfecha::date
+  );
+
+    RAISE NOTICE 'Correcto. La fecha ingresado NO existe.';
+    IF (pidtipo = 0) THEN
+        IF (SELECT NOT EXISTS (SELECT 1 FROM ope_caja
+                               WHERE id_tipo = 1349
+                               AND apiestado <> 'ANULADO'
+                               AND id_ubicacion = vid_ubicacion
+                               AND fecha = pfecha::date)) THEN
+            IF (vid_tipo IS NULL OR (SELECT COUNT(*) FROM ope_caja WHERE apiestado <> 'ANULADO' AND id_ubicacion = vid_ubicacion) = 0) THEN
+                RAISE NOTICE 'Se trata de un nuevo registro sin apertura ni caja anterior.';
+                BEGIN
+                    IF (SELECT NOT EXISTS (SELECT 1 FROM seg_usuario
+                                           WHERE id_usuario = pidlogin
+                                           AND id_proyecto = vid_ubicacion
+                                           AND apiestado NOT ILIKE 'ANULADO')) THEN
+                        omensaje := 'Error 001: El usuario ingresado no existe. Por favor, revíselo nuevamente.';
+                        oboolean := FALSE;
+                        RETURN;
+                    ELSE
+                        RAISE NOTICE 'Correcto. El usuario ingresado SI existe.';
+                        INSERT INTO public.ope_caja (id_tipo, monto_total, fecha, encargado, id_ubicacion, turno)
+                        VALUES (1349, psaldoactual, pfecha::date, pencargado, vid_ubicacion, oturno);
+                    END IF;
+                    EXCEPTION WHEN others THEN
+                        omensaje := 'Error 002: Comuníquese con el administrador de sistemas ECONOTEC';
+                        oboolean := FALSE;
+                        RETURN;
+                END;
+            ELSE
+                IF (vid_tipo = 1350 AND psaldoactual = vmonto_saldo) THEN
+                    RAISE NOTICE 'Se trata de un nuevo registro con cierre de caja anterior.';
+                    BEGIN
+                        IF (SELECT NOT EXISTS (SELECT 1 FROM seg_usuario
+                                               WHERE id_usuario = pidlogin
+                                               AND id_proyecto = vid_ubicacion
+                                               AND apiestado NOT ILIKE 'ANULADO')) THEN
+                            omensaje := 'Error 001: El usuario ingresado no existe. Por favor, revíselo nuevamente.';
+                            oboolean := FALSE;
+                            RETURN;
+                        ELSE
+                            RAISE NOTICE 'Correcto. El usuario ingresado SI existe.';
+                            INSERT INTO public.ope_caja (id_tipo, monto_total, fecha, encargado, id_ubicacion, turno)
+                            VALUES (1349, psaldoactual, pfecha::date, pencargado, vid_ubicacion, oturno);
+                        END IF;
+                        EXCEPTION WHEN others THEN
+                            omensaje := 'Error 002: Comuníquese con el administrador de sistemas ECONOTEC';
+                            oboolean := FALSE;
+                            RETURN;
+                    END;
+                ELSE
+                    IF (vid_tipo = 1349) THEN
+                        omensaje := 'La fecha ' || vfecha_ant || ' no cuenta con un cierre de caja. Por favor, cierre caja antes de abrir una apertura de caja.';
+                        oboolean := FALSE;
+                        RETURN;
+                    ELSE
+                        omensaje := 'El monto de apertura no puede ser diferente al monto de caja chica del anterior cierre.';
+                        oboolean := FALSE;
+                        omonto := vmonto_saldo;
+                        RETURN;
+                    END IF;
+                END IF;
+            END IF;
+        ELSE
+            omensaje := 'La fecha ingresada ya cuenta con una apertura de caja. Por favor, revíselo nuevamente.';
+            oboolean := FALSE;
+            RETURN;
+        END IF;
+    ELSE
+        RAISE NOTICE 'Se trata de un registro antiguo que será modificado.';
+        BEGIN
+            IF (SELECT NOT EXISTS (SELECT 1 FROM seg_usuario
+                                   WHERE id_usuario = pidlogin
+                                   AND id_proyecto = vid_ubicacion
+                                   AND apiestado NOT ILIKE 'ANULADO')) THEN
+                omensaje := 'Error 003: El usuario ingresado no existe. Por favor, revíselo nuevamente.';
+                oboolean := FALSE;
+                RETURN;
+            ELSE
+                RAISE NOTICE 'Correcto. El usuario ingresado SI existe.';
+                UPDATE ope_caja 
+                SET monto_total = psaldoactual,
+                    fecha = pfecha::date,
+                    encargado = pencargado,
+                    turno = oturno
+                WHERE id_caja = pidcaja;
+            END IF;
+            EXCEPTION WHEN others THEN
+                omensaje := 'Error 004: Comuníquese con el administrador de sistemas ECONOTEC';
+                oboolean := FALSE;
+                RETURN;
+        END;
+    END IF;
+
+    IF (omensaje = '') THEN
+        oboolean := TRUE;
+    ELSE
+        oboolean := FALSE;
+    END IF;
+    RETURN;
+END;
+$function$
+;
